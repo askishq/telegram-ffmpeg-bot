@@ -1,6 +1,7 @@
 import os
 import subprocess
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -31,6 +32,31 @@ def run_http_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
+
+
+# GoFile-এ ফাইল আপলোড করার ফাংশন
+def upload_to_gofile(file_path):
+    try:
+        # ১. GoFile-এর সেরা সার্ভার নির্বাচন
+        server_resp = requests.get("https://api.gofile.io/servers").json()
+        if server_resp.get("status") == "ok":
+            server = server_resp["data"]["servers"][0]["name"]
+        else:
+            server = "store1"
+
+        # ২. ফাইল আপলোড করা
+        upload_url = f"https://{server}.gofile.io/contents/uploadfile"
+        with open(file_path, "rb") as f:
+            files = {"file": f}
+            response = requests.post(upload_url, files=files).json()
+
+        if response.get("status") == "ok":
+            return response["data"]["downloadPage"]
+        else:
+            return None
+    except Exception as e:
+        print(f"GoFile Upload Error: {e}")
+        return None
 
 
 # /start কমান্ড হ্যান্ডলার
@@ -103,9 +129,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     process = subprocess.run(cmd, shell=True)
 
     if process.returncode == 0 and os.path.exists(output_file):
-        await query.message.reply_text("✅ ভিডিও এডিটিং সম্পন্ন হয়েছে! পাঠানো হচ্ছে...")
-        with open(output_file, 'rb') as video:
-            await query.message.reply_video(video=video, caption=f"{mode.capitalize()} Screen Successfully Created!")
+        file_size_mb = os.path.getsize(output_file) / (1024 * 1024)
+        
+        # ভিডিও ২০ MB এর চেয়ে বড় হলে GoFile-এ আপলোড হবে
+        if file_size_mb > 20:
+            await query.message.reply_text("📤 ভিডিও সাইজ ২০ MB-র বেশি হওয়ায় GoFile-এ আপলোড করা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
+            download_link = upload_to_gofile(output_file)
+            
+            if download_link:
+                await query.message.reply_text(
+                    f"✅ আপনার এডিট করা ভিডিও তৈরি হয়ে গেছে!\n\n"
+                    f"🔗 **Download Link:** {download_link}",
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.message.reply_text("❌ GoFile-এ ফাইল আপলোড করতে একটি সমস্যা হয়েছে।")
+        else:
+            # ২০ MB-র নিচে হলে সরাসরি টেলিগ্রামে ভিডিও সেন্ড হবে
+            await query.message.reply_text("✅ ভিডিও এডিটিং সম্পন্ন হয়েছে! পাঠানো হচ্ছে...")
+            with open(output_file, 'rb') as video:
+                await query.message.reply_video(video=video, caption=f"{mode.capitalize()} Screen Successfully Created!")
     else:
         await query.message.reply_text("❌ এডিটিং করার সময় কোনো একটি সমস্যা দেখা দিয়েছে।")
 
@@ -118,7 +161,6 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    # নরমাল ভিডিও এবং ফাইল/ডকুমেন্ট হিসেবে পাঠানো ভিডিও উভয়ই গ্রহণ করার ফিল্টার
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, handle_video))
     app.add_handler(CallbackQueryHandler(button_handler))
     
