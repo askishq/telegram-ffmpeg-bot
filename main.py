@@ -1,4 +1,6 @@
 import os
+import re
+import math
 import subprocess
 import threading
 import requests
@@ -16,35 +18,39 @@ from telegram.ext import (
 # Render-এর Environment Variable থেকে টোকেন গ্রহণ
 TOKEN = "8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA"
 
-# টোকেন লোড হয়েছে কি না তা যাচাইকরণ
 if not TOKEN:
     raise ValueError("ERROR: BOT_TOKEN পাওয়া যায়নি! Render-এর Environment Settings চেক করুন।")
 
 
-# Render Health Check-এর জন্য Dummy HTTP Server
+# UptimeRobot / Render Health Check-এর জন্য HTTP Server
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"Bot is running successfully!")
+        self.wfile.write(b"Bot is alive and running!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
 
 def run_http_server():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    print(f"HTTP Server listening on port {port}")
     server.serve_forever()
 
 
 # GoFile-এ ফাইল আপলোড করার ফাংশন
 def upload_to_gofile(file_path):
     try:
-        # ১. GoFile-এর সেরা সার্ভার নির্বাচন
         server_resp = requests.get("https://api.gofile.io/servers").json()
         if server_resp.get("status") == "ok":
             server = server_resp["data"]["servers"][0]["name"]
         else:
             server = "store1"
 
-        # ২. ফাইল আপলোড করা
         upload_url = f"https://{server}.gofile.io/contents/uploadfile"
         with open(file_path, "rb") as f:
             files = {"file": f}
@@ -59,6 +65,16 @@ def upload_to_gofile(file_path):
         return None
 
 
+# ভিডিওর মোট সময় (Duration) সেকেন্ডে বের করার ফাংশন
+def get_video_duration(input_file):
+    try:
+        cmd = f'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "{input_file}"'
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 # /start কমান্ড হ্যান্ডলার
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -71,7 +87,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     
-    # ভিডিও অথবা ডকুমেন্ট উভয় ফরম্যাট থেকে ফাইল রিসিভ করা
     if message.video:
         video_file = await message.video.get_file()
     elif message.document:
@@ -79,13 +94,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    # ইনপুট ও আউটপুট ফোল্ডার তৈরি
     os.makedirs("input", exist_ok=True)
     os.makedirs("output", exist_ok=True)
     input_path = "input/v.mp4"
     await video_file.download_to_drive(input_path)
 
-    # Inline Keyboard Buttons তৈরি
     keyboard = [
         [
             InlineKeyboardButton("🎬 Full Screen", callback_data="fullscreen"),
@@ -96,15 +109,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("ভিডিও পাওয়া গেছে! কোন মোডে এডিট করতে চান সিলেক্ট করুন:", reply_markup=reply_markup)
 
 
-# বাটনে ক্লিক করলে এডিটিং রান করার ফাংশন
+# বাটনে ক্লিক করলে এডিটিং ও লাইভ প্রোগ্রেস দেখানোর ফাংশন
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     mode = query.data
-    await query.edit_message_text(text=f"⏳ প্রসেসিং শুরু হয়েছে ({mode.upper()} মোড)... অনুগ্রহ করে অপেক্ষা করুন।")
+    status_msg = await query.edit_message_text(text=f"⏳ প্রসেসিং শুরু হচ্ছে ({mode.upper()} মোড)... 0%")
 
     input_file = "input/v.mp4"
+    total_duration = get_video_duration(input_file)
     
     if mode == "fullscreen":
         output_file = "output/Full_Screen_Output.mp4"
@@ -125,15 +139,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'"{output_file}"'
         )
 
-    # FFmpeg কমান্ড রান করা
-    process = subprocess.run(cmd, shell=True)
+    # FFmpeg প্রসেস রান ও লাইভ শতাংশ আপডেট
+    process = subprocess.Popen(cmd, shell=True, stderr=subprocess.PIPE, universal_newlines=True)
+    
+    last_percent = -1
+    for line in process.stderr:
+        if "time=" in line and total_duration > 0:
+            match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+            if match:
+                hours, minutes, seconds = map(float, match.groups())
+                current_time = hours * 3600 + minutes * 60 + seconds
+                percent = min(100, math.floor((current_time / total_duration) * 100))
+                
+                # ১০% পর পর মেসেজ আপডেট হবে (টেলিগ্রাম এপিআই লিমিট এড়াতে)
+                if percent >= last_percent + 10:
+                    last_percent = percent
+                    try:
+                        await status_msg.edit_text(f"⏳ এডিটিং চলছে ({mode.upper()}): {percent}% সম্পন্ন...")
+                    except Exception:
+                        pass
+
+    process.wait()
 
     if process.returncode == 0 and os.path.exists(output_file):
         file_size_mb = os.path.getsize(output_file) / (1024 * 1024)
         
-        # ভিডিও ২০ MB এর চেয়ে বড় হলে GoFile-এ আপলোড হবে
         if file_size_mb > 20:
-            await query.message.reply_text("📤 ভিডিও সাইজ ২০ MB-র বেশি হওয়ায় GoFile-এ আপলোড করা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
+            await status_msg.edit_text("📤 ভিডিও সাইজ ২০ MB-র বেশি হওয়ায় GoFile-এ আপলোড করা হচ্ছে...")
             download_link = upload_to_gofile(output_file)
             
             if download_link:
@@ -145,16 +177,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.message.reply_text("❌ GoFile-এ ফাইল আপলোড করতে একটি সমস্যা হয়েছে।")
         else:
-            # ২০ MB-র নিচে হলে সরাসরি টেলিগ্রামে ভিডিও সেন্ড হবে
-            await query.message.reply_text("✅ ভিডিও এডিটিং সম্পন্ন হয়েছে! পাঠানো হচ্ছে...")
+            await status_msg.edit_text("✅ এডিটিং সম্পন্ন! ভিডিও পাঠানো হচ্ছে...")
             with open(output_file, 'rb') as video:
                 await query.message.reply_video(video=video, caption=f"{mode.capitalize()} Screen Successfully Created!")
     else:
-        await query.message.reply_text("❌ এডিটিং করার সময় কোনো একটি সমস্যা দেখা দিয়েছে।")
+        await status_msg.edit_text("❌ এডিটিং করার সময় কোনো একটি সমস্যা দেখা দিয়েছে।")
 
 
 if __name__ == '__main__':
-    # ব্যাকগ্রাউন্ডে HTTP সার্ভার চালু করা (Render Health Check-এর জন্য)
+    # ব্যাকগ্রাউন্ডে HTTP সার্ভার চালু করা (UptimeRobot / Render Health Check-এর জন্য)
     threading.Thread(target=run_http_server, daemon=True).start()
 
     # টেলিগ্রাম বট অ্যাপ্লিকেশন সেটআপ
