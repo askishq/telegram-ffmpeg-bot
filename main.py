@@ -13,7 +13,6 @@ from telegram.ext import (
 )
 
 # Render-এর Environment Variable থেকে টোকেন গ্রহণ
-# সরাসরি টোকেন বসিয়ে দিন
 TOKEN = "8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA"
 
 # টোকেন লোড হয়েছে কি না তা যাচাইকরণ
@@ -42,11 +41,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ইউজার ভিডিও পাঠালে হ্যান্ডেল করার ফাংশন
+# ইউজার ভিডিও বা ফাইল পাঠালে হ্যান্ডেল করার ফাংশন
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    video_file = await message.video.get_file()
     
+    # ভিডিও অথবা ডকুমেন্ট উভয় ফরম্যাট থেকে ফাইল রিসিভ করা
+    if message.video:
+        video_file = await message.video.get_file()
+    elif message.document:
+        video_file = await message.document.get_file()
+    else:
+        return
+
     # ইনপুট ও আউটপুট ফোল্ডার তৈরি
     os.makedirs("input", exist_ok=True)
     os.makedirs("output", exist_ok=True)
@@ -105,14 +111,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
-    # బ్యాగ్రౌండ్ ব্যাকগ্রাউন্ডে HTTP సర్వర్ চালু করা
+    # ব্যাকগ্রাউন্ডে HTTP সার্ভার চালু করা (Render Health Check-এর জন্য)
     threading.Thread(target=run_http_server, daemon=True).start()
 
     # টেলিগ্রাম বট অ্যাপ্লিকেশন সেটআপ
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    # নরমাল ভিডিও এবং ফাইল/ডকুমেন্ট হিসেবে পাঠানো ভিডিও উভয়ই গ্রহণ করার ফিল্টার
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, handle_video))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("Bot is listening for videos...")
