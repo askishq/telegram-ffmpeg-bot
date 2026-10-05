@@ -13,7 +13,8 @@ from telegram.ext import (
 )
 
 # Render-এর Environment Variable থেকে টোকেন গ্রহণ
-TOKEN = os.getenv("8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA")
+# সরাসরি টোকেন বসিয়ে দিন
+TOKEN = "8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA"
 
 # টোকেন লোড হয়েছে কি না তা যাচাইকরণ
 if not TOKEN:
