@@ -1,5 +1,7 @@
 import os
 import subprocess
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,25 +12,47 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.environ.get("8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA")
+# Render-এর Environment Variable থেকে টোকেন গ্রহণ
+TOKEN = os.getenv("8768229210:AAFZRrhz89j5KJNV5CF9eZbe4I8hEpt8mBA")
 
-# /start Command
+# টোকেন লোড হয়েছে কি না তা যাচাইকরণ
+if not TOKEN:
+    raise ValueError("ERROR: BOT_TOKEN পাওয়া যায়নি! Render-এর Environment Settings চেক করুন।")
+
+
+# Render Health Check-এর জন্য Dummy HTTP Server
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running successfully!")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+
+# /start কমান্ড হ্যান্ডলার
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "স্বাগতম! আমাকে একটি ভিডিও পাঠান।\n"
         "তারপর Full Screen বা Half Screen সিলেক্ট করে ভিডিও এডিট করতে পারবেন।"
     )
 
-# Handle incoming Video
+
+# ইউজার ভিডিও পাঠালে হ্যান্ডেল করার ফাংশন
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     video_file = await message.video.get_file()
     
+    # ইনপুট ও আউটপুট ফোল্ডার তৈরি
     os.makedirs("input", exist_ok=True)
     os.makedirs("output", exist_ok=True)
     input_path = "input/v.mp4"
     await video_file.download_to_drive(input_path)
 
+    # Inline Keyboard Buttons তৈরি
     keyboard = [
         [
             InlineKeyboardButton("🎬 Full Screen", callback_data="fullscreen"),
@@ -38,7 +62,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await message.reply_text("ভিডিও পাওয়া গেছে! কোন মোডে এডিট করতে চান সিলেক্ট করুন:", reply_markup=reply_markup)
 
-# Handle Button Click Actions
+
+# বাটনে ক্লিক করলে এডিটিং রান করার ফাংশন
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -67,6 +92,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'"{output_file}"'
         )
 
+    # FFmpeg কমান্ড রান করা
     process = subprocess.run(cmd, shell=True)
 
     if process.returncode == 0 and os.path.exists(output_file):
@@ -76,11 +102,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.message.reply_text("❌ এডিটিং করার সময় কোনো একটি সমস্যা দেখা দিয়েছে।")
 
+
 if __name__ == '__main__':
+    # బ్యాగ్రౌండ్ ব্যাকগ্রাউন্ডে HTTP సర్వర్ চালু করা
+    threading.Thread(target=run_http_server, daemon=True).start()
+
+    # টেলিগ্রাম বট অ্যাপ্লিকেশন সেটআপ
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(button_handler))
     
+    print("Bot is listening for videos...")
     app.run_polling()
